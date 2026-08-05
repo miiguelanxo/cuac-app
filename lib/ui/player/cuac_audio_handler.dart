@@ -70,7 +70,12 @@ class CuacAudioHandler extends BaseAudioHandler {
   Future<void> play() => _player.play();
 
   @override
-  Future<void> pause() => _player.pause();
+  Future<void> pause() async {
+    try {
+      Injector.appInstance.get<CurrentPlayerContract>().pause();
+    } catch (_) {}
+    await _player.pause();
+  }
 
   @override
   Future<void> stop() async {

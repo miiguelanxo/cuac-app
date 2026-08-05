@@ -201,6 +201,7 @@ class CurrentPlayer implements CurrentPlayerContract {
   bool _suppressLiveLog = false;
   int _liveRetryCount = 0;
   Timer? _liveRetryTimer;
+  bool _userPaused = false;
   static const _maxLiveRetries = 5;
 
   @override
@@ -293,6 +294,7 @@ class CurrentPlayer implements CurrentPlayerContract {
   @override
   Future<bool> play() async {
     if (playerState != AudioPlayerState.play) {
+      _userPaused = false;
       // Cancel previous subscriptions to avoid accumulation
       await _stateSubscription?.cancel();
       await _durationSubscription?.cancel();
@@ -314,7 +316,9 @@ class CurrentPlayer implements CurrentPlayerContract {
         } else if (event.processingState == ProcessingState.idle &&
             playerState != AudioPlayerState.stop) {
           if (!isPodcast) {
-            _scheduleLiveRetry();
+            if (!_userPaused) {
+              _scheduleLiveRetry();
+            }
           } else {
             playerState = AudioPlayerState.stop;
             isPodcast = false;
@@ -331,7 +335,8 @@ class CurrentPlayer implements CurrentPlayerContract {
           if (onConnection != null) onConnection!(false);
         }
       }, onError: (Object e, StackTrace s) {
-        if (!isPodcast && playerState != AudioPlayerState.stop) {
+        if (!isPodcast && !_userPaused &&
+            playerState != AudioPlayerState.stop) {
           _scheduleLiveRetry();
         }
       });
@@ -407,6 +412,7 @@ class CurrentPlayer implements CurrentPlayerContract {
     if (playerState == AudioPlayerState.play ||
         playerState == AudioPlayerState.pause) {
       _endWrappedSession();
+      _userPaused = false;
       if (!isPodcast) {
         playbackRate = 1.0;
         audioPlayer.setSpeed(playbackRate);
@@ -447,7 +453,9 @@ class CurrentPlayer implements CurrentPlayerContract {
     }
     _liveRetryCount++;
     _liveRetryTimer = Timer(const Duration(seconds: 2), () async {
-      if (isPodcast || playerState == AudioPlayerState.stop) return;
+      if (isPodcast || _userPaused || playerState == AudioPlayerState.stop) {
+        return;
+      }
       _suppressLiveLog = true;
       await _stop();
       await play();
@@ -458,6 +466,7 @@ class CurrentPlayer implements CurrentPlayerContract {
   @override
   void stop() {
     _pendingLiveRestart = false;
+    _userPaused = false;
     _liveRetryTimer?.cancel();
     _liveRetryCount = 0;
     _stop();
@@ -487,6 +496,7 @@ class CurrentPlayer implements CurrentPlayerContract {
   @override
   Future resume() async {
     if (playerState == AudioPlayerState.pause) {
+      _userPaused = false;
       playerState = AudioPlayerState.play;
       await audioPlayer.play();
     }
@@ -495,6 +505,7 @@ class CurrentPlayer implements CurrentPlayerContract {
   @override
   Future pause() async {
     if (playerState == AudioPlayerState.play) {
+      _userPaused = true;
       await audioPlayer.pause();
       if (!audioPlayer.playing) playerState = AudioPlayerState.pause;
     }
