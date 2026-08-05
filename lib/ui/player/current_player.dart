@@ -1,5 +1,10 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
 
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cuacfm/domain/invoker/invoker.dart';
@@ -128,8 +133,67 @@ class CurrentPlayer implements CurrentPlayerContract {
     );
   }
 
+  final Map<String, Uri> _squareArtCache = {};
+  int _artToken = 0;
+
   void _publishNowPlaying() {
-    _handler?.setNowPlaying(_buildMediaItem(), isLive: !isPodcast);
+    final item = _buildMediaItem();
+    final src = item.artUri;
+    final cached = src == null ? null : _squareArtCache[src.toString()];
+    _handler?.setNowPlaying(
+        cached != null ? item.copyWith(artUri: cached) : item,
+        isLive: !isPodcast);
+    final token = ++_artToken;
+    if (src != null && cached == null) {
+      _squareArt(src).then((square) {
+        if (square != null && square != src && token == _artToken) {
+          _handler?.setNowPlaying(item.copyWith(artUri: square),
+              isLive: !isPodcast);
+        }
+      });
+    }
+  }
+
+  Future<Uri?> _squareArt(Uri src) async {
+    final key = src.toString();
+    if (_squareArtCache.containsKey(key)) return _squareArtCache[key];
+    try {
+      final dir = await getTemporaryDirectory();
+      final file = File(
+          '${dir.path}/art_${md5.convert(utf8.encode(key)).toString()}.png');
+      if (await file.exists()) {
+        final uri = Uri.file(file.path);
+        _squareArtCache[key] = uri;
+        return uri;
+      }
+      final response = await http.get(src);
+      if (response.statusCode != 200) return null;
+      final codec = await ui.instantiateImageCodec(response.bodyBytes);
+      final image = (await codec.getNextFrame()).image;
+      if (image.width == image.height) {
+        _squareArtCache[key] = src;
+        return src;
+      }
+      final side = math.min(image.width, image.height);
+      final dx = ((image.width - side) / 2).toDouble();
+      final dy = ((image.height - side) / 2).toDouble();
+      final recorder = ui.PictureRecorder();
+      ui.Canvas(recorder).drawImageRect(
+        image,
+        ui.Rect.fromLTWH(dx, dy, side.toDouble(), side.toDouble()),
+        ui.Rect.fromLTWH(0, 0, side.toDouble(), side.toDouble()),
+        ui.Paint(),
+      );
+      final out = await recorder.endRecording().toImage(side, side);
+      final data = await out.toByteData(format: ui.ImageByteFormat.png);
+      if (data == null) return null;
+      await file.writeAsBytes(data.buffer.asUint8List());
+      final uri = Uri.file(file.path);
+      _squareArtCache[key] = uri;
+      return uri;
+    } catch (_) {
+      return null;
+    }
   }
 
   void _startWrappedSession() {
