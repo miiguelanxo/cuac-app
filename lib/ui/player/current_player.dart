@@ -214,16 +214,30 @@ class CurrentPlayer implements CurrentPlayerContract {
         .drain();
   }
 
-  void _logLivePlay() {
-    if (isPodcast || _suppressLiveLog) return;
-    final live = currentSong.trim();
-    FirebaseAnalytics.instance.logEvent(
-      name: 'live_play',
-      parameters: {
-        'program': live.isNotEmpty && live != ':' ? live : 'Continuidade CUAC FM',
-        'source': playbackSource,
-      },
-    );
+  void _logPlay() {
+    if (_suppressLiveLog) return;
+    if (isPodcast) {
+      final program = currentSong.trim();
+      FirebaseAnalytics.instance.logEvent(
+        name: 'podcast_play',
+        parameters: {
+          'program': program.isNotEmpty && program != ':'
+              ? program
+              : (episode?.title ?? ''),
+          'episode': episode?.title ?? '',
+          'source': playbackSource,
+        },
+      );
+    } else {
+      final live = currentSong.trim();
+      FirebaseAnalytics.instance.logEvent(
+        name: 'live_play',
+        parameters: {
+          'program': live.isNotEmpty && live != ':' ? live : 'Continuidade CUAC FM',
+          'source': playbackSource,
+        },
+      );
+    }
   }
 
   void _refreshNotificationMetadata() {
@@ -449,7 +463,7 @@ class CurrentPlayer implements CurrentPlayerContract {
         if (audioPlayer.playing) {
           playerState = AudioPlayerState.play;
           _startWrappedSession();
-          _logLivePlay();
+          _logPlay();
         }
         if (restorePosition != Duration(seconds: 0) &&
             restoreDuration != Duration(seconds: 0) &&
@@ -498,7 +512,7 @@ class CurrentPlayer implements CurrentPlayerContract {
       if (audioPlayer.playing) {
         playerState = AudioPlayerState.play;
         _startWrappedSession();
-        _logLivePlay();
+        _logPlay();
       }
       return true;
     } else {
