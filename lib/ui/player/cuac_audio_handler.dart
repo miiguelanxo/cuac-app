@@ -1,4 +1,6 @@
 import 'package:audio_service/audio_service.dart';
+import 'package:cuacfm/ui/player/current_player.dart';
+import 'package:injector/injector.dart';
 import 'package:just_audio/just_audio.dart';
 
 class CuacAudioHandler extends BaseAudioHandler {
@@ -68,10 +70,18 @@ class CuacAudioHandler extends BaseAudioHandler {
   Future<void> play() => _player.play();
 
   @override
-  Future<void> pause() => _player.pause();
+  Future<void> pause() async {
+    try {
+      Injector.appInstance.get<CurrentPlayerContract>().pause();
+    } catch (_) {}
+    await _player.pause();
+  }
 
   @override
   Future<void> stop() async {
+    try {
+      Injector.appInstance.get<CurrentPlayerContract>().stop();
+    } catch (_) {}
     await _player.stop();
     await super.stop();
   }

@@ -64,7 +64,7 @@ class _FakeAudioPlayer extends Fake implements AudioPlayer {
   }
 
   @override
-  Future<void> seek(Duration? position, {Duration? rest}) async {
+  Future<void> seek(Duration? position, {int? index}) async {
     if (position != null) seekCalls.add(position);
   }
 
