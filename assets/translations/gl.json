@@ -24,6 +24,7 @@
     "news_error" : "Non podemos cargar a novas agora mesmo.",
     "podcast" : "Podcasts",
     "podcast_error" : "Non podemos cargar os podcasts neste momento.",
+    "podcast_retry" : "Inténtao de novo dentro dun anaco.",
     "categories" : "Categorías",
     "see_all" : "Ver todos"
   },

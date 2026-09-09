@@ -13,6 +13,7 @@ import 'package:cuacfm/domain/usecase/end_session_use_case.dart';
 import 'package:cuacfm/domain/usecase/get_playlist_use_case.dart';
 import 'package:cuacfm/domain/usecase/remove_from_playlist_use_case.dart';
 import 'package:cuacfm/domain/usecase/start_session_use_case.dart';
+import 'package:cuacfm/data/datasource/episode_progress_local_datasource_contract.dart';
 import 'package:cuacfm/models/episode.dart';
 import 'package:cuacfm/models/now.dart';
 import 'package:cuacfm/models/radiostation.dart';
@@ -20,6 +21,7 @@ import 'package:firebase_analytics/firebase_analytics.dart';
 import 'package:flutter/services.dart';
 import 'package:audio_service/audio_service.dart';
 import 'package:cuacfm/ui/player/cuac_audio_handler.dart';
+import 'package:cuacfm/utils/live_diag.dart';
 import 'package:injector/injector.dart';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
@@ -103,10 +105,14 @@ class CurrentPlayer implements CurrentPlayerContract {
   }
 
   static const _fallbackArtUrl = "https://cuacfm.org/wp-content/uploads/2026/04/cuac_music_cover.png";
+  static const _defaultProgrammeArtUrl = "https://cuacfm.org/wp-content/uploads/2026/06/default_programme_cover.png";
   Uri get _artUri {
     final img = currentImage;
-    if (img.startsWith('assets/') || img.contains('default-programme-photo') || img.isEmpty) {
+    if (img.contains('cuac_music_cover')) {
       return Uri.parse(_fallbackArtUrl);
+    }
+    if (img.startsWith('assets/') || img.contains('default-programme-photo') || img.isEmpty) {
+      return Uri.parse(_defaultProgrammeArtUrl);
     }
     return Uri.parse(img);
   }
@@ -143,9 +149,11 @@ class CurrentPlayer implements CurrentPlayerContract {
     _handler?.setNowPlaying(
         cached != null ? item.copyWith(artUri: cached) : item,
         isLive: !isPodcast);
+    LiveDiag.log('art "${currentSong.trim()}" initial=${(cached ?? src)?.scheme} src=$src');
     final token = ++_artToken;
     if (src != null && cached == null) {
       _squareArt(src).then((square) {
+        LiveDiag.log('art "${currentSong.trim()}" resolved=${square?.scheme} (cropped=${square != null && square != src})');
         if (square != null && square != src && token == _artToken) {
           _handler?.setNowPlaying(item.copyWith(artUri: square),
               isLive: !isPodcast);
@@ -160,7 +168,7 @@ class CurrentPlayer implements CurrentPlayerContract {
     try {
       final dir = await getTemporaryDirectory();
       final file = File(
-          '${dir.path}/art_${md5.convert(utf8.encode(key)).toString()}.png');
+          '${dir.path}/art2_${md5.convert(utf8.encode(key)).toString()}.png');
       if (await file.exists()) {
         final uri = Uri.file(file.path);
         _squareArtCache[key] = uri;
@@ -170,11 +178,13 @@ class CurrentPlayer implements CurrentPlayerContract {
       if (response.statusCode != 200) return null;
       final codec = await ui.instantiateImageCodec(response.bodyBytes);
       final image = (await codec.getNextFrame()).image;
-      if (image.width == image.height) {
+      final minSide = math.min(image.width, image.height);
+      final maxSide = math.max(image.width, image.height);
+      if (minSide / maxSide >= 0.9) {
         _squareArtCache[key] = src;
         return src;
       }
-      final side = math.min(image.width, image.height);
+      final side = minSide;
       final dx = ((image.width - side) / 2).toDouble();
       final dy = ((image.height - side) / 2).toDouble();
       final recorder = ui.PictureRecorder();
@@ -212,6 +222,42 @@ class CurrentPlayer implements CurrentPlayerContract {
     Injector.appInstance.get<Invoker>()
         .execute(Injector.appInstance.get<EndSessionUseCase>())
         .drain();
+  }
+
+  int _lastProgressSaveSec = -10;
+  int _lastLivePosLogMs = 0;
+
+  EpisodeProgressLocalDataSourceContract? get _progressStore {
+    try {
+      return Injector.appInstance
+          .get<EpisodeProgressLocalDataSourceContract>();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _saveProgress() {
+    if (!isPodcast) return;
+    final id = episode?.audio ?? '';
+    if (id.isEmpty || duration.inSeconds <= 0) return;
+    _progressStore?.save(id, position.inSeconds, duration.inSeconds,
+        title: episode?.title, programName: currentSong, logoUrl: currentImage);
+    _lastProgressSaveSec = position.inSeconds;
+  }
+
+  Duration? _savedResumePosition() {
+    if (!isPodcast) return null;
+    final saved = _progressStore?.getProgress(episode?.audio ?? '');
+    if (saved == null || saved['completed'] == true) return null;
+    final pos = (saved['position'] as num?)?.toInt() ?? 0;
+    final dur = (saved['duration'] as num?)?.toInt() ?? 0;
+    if (pos > 5 && (dur <= 0 || pos < dur - 5)) {
+      if (dur > 0) duration = Duration(seconds: dur);
+      position = Duration(seconds: pos);
+      _lastProgressSaveSec = pos;
+      return Duration(seconds: pos);
+    }
+    return null;
   }
 
   void _logPlay() {
@@ -280,11 +326,12 @@ class CurrentPlayer implements CurrentPlayerContract {
   int _liveRetryCount = 0;
   Timer? _liveRetryTimer;
   bool _userPaused = false;
-  static const _maxLiveRetries = 5;
+  bool _userWantsLive = false;
 
   @override
   void restorePlayer(ConnectivityResult connection) async {
     if (!isPodcast) {
+      LiveDiag.log('restorePlayer connection=$connection prev=$connectivityResult playing=${isPlaying()}');
       if (connection == ConnectivityResult.none) {
         if (isPlaying()) {
           await _stop();
@@ -373,31 +420,40 @@ class CurrentPlayer implements CurrentPlayerContract {
   Future<bool> play() async {
     if (playerState != AudioPlayerState.play) {
       _userPaused = false;
+      if (!isPodcast) _userWantsLive = true;
       // Cancel previous subscriptions to avoid accumulation
       await _stateSubscription?.cancel();
       await _durationSubscription?.cancel();
       await _positionSubscription?.cancel();
 
       _stateSubscription = audioPlayer.playerStateStream.listen((event) async {
+        if (!isPodcast) {
+          LiveDiag.log('state playing=${event.playing} proc=${event.processingState} st=$playerState userPaused=$_userPaused');
+        }
         if (!isPodcast &&
             event.playing &&
             event.processingState == ProcessingState.ready) {
           _liveRetryCount = 0;
+          _liveRetryTimer?.cancel();
         }
         if (isPodcast && event.processingState == ProcessingState.completed) {
+          final finishedId = episode?.audio ?? '';
+          if (finishedId.isNotEmpty && duration.inSeconds > 0) {
+            _progressStore?.markCompleted(finishedId, duration.inSeconds);
+          }
           await _stop();
           position = Duration.zero;
           restoreDuration = Duration.zero;
           restorePosition = Duration.zero;
           await _playNextInPlaylist();
           if (onUpdate != null) onUpdate!();
-        } else if (event.processingState == ProcessingState.idle &&
-            playerState != AudioPlayerState.stop) {
+        } else if (event.processingState == ProcessingState.idle) {
           if (!isPodcast) {
-            if (!_userPaused) {
+            if (_userWantsLive && !_userPaused) {
+              LiveDiag.log('idle while live (userPaused=$_userPaused)');
               _scheduleLiveRetry();
             }
-          } else {
+          } else if (playerState != AudioPlayerState.stop) {
             playerState = AudioPlayerState.stop;
             isPodcast = false;
             if (onUpdate != null) onUpdate!();
@@ -413,8 +469,8 @@ class CurrentPlayer implements CurrentPlayerContract {
           if (onConnection != null) onConnection!(false);
         }
       }, onError: (Object e, StackTrace s) {
-        if (!isPodcast && !_userPaused &&
-            playerState != AudioPlayerState.stop) {
+        LiveDiag.log('playerState onError: $e');
+        if (!isPodcast && !_userPaused && _userWantsLive) {
           _scheduleLiveRetry();
         }
       });
@@ -433,11 +489,20 @@ class CurrentPlayer implements CurrentPlayerContract {
           if (p.inSeconds.ceilToDouble() >= 0.0 &&
               p.inSeconds.ceilToDouble() <= duration.inSeconds.ceilToDouble()) {
             position = p;
+            if ((p.inSeconds - _lastProgressSaveSec).abs() >= 5) {
+              _saveProgress();
+            }
             if (onUpdate != null) {
               onUpdate!();
             }
           }
         } else {
+          final nowMs = DateTime.now().millisecondsSinceEpoch;
+          if (nowMs - _lastLivePosLogMs >= 5000) {
+            _lastLivePosLogMs = nowMs;
+            LiveDiag.log(
+                'live realpos=${p.inSeconds}s playing=${audioPlayer.playing} proc=${audioPlayer.processingState} st=$playerState userWantsLive=$_userWantsLive');
+          }
           position = Duration(seconds: 1);
           duration = Duration(hours: 24);
           _liveRetryCount = 0;
@@ -456,25 +521,33 @@ class CurrentPlayer implements CurrentPlayerContract {
         AudioSource audioSource = AudioSource.uri(Uri.parse(isPodcast
             ? episode?.audio ?? RadioStation.base().streamUrl
             : now?.streamUrl() ?? RadioStation.base().streamUrl));
-        audioPlayer.setAudioSource(audioSource);
+        Duration? resumeAt;
+        if (isPodcast) {
+          if (restorePosition != Duration(seconds: 0) &&
+              restoreDuration != Duration(seconds: 0) &&
+              tempEpisode == episode) {
+            duration = restoreDuration;
+            tempEpisode = null;
+            resumeAt = restorePosition;
+          } else {
+            resumeAt = _savedResumePosition();
+          }
+          restoreDuration = Duration(seconds: 0);
+          restorePosition = Duration(seconds: 0);
+        }
+        audioPlayer.setAudioSource(audioSource, initialPosition: resumeAt);
         _publishNowPlaying();
         await audioPlayer.play();
-        await audioPlayer.seek(position);
-        if (audioPlayer.playing) {
+        if (resumeAt == null) await audioPlayer.seek(position);
+        if (!isPodcast) {
+          playerState = AudioPlayerState.play;
+          if (!_suppressLiveLog) LiveDiag.log('play() STARTED live');
+          _startWrappedSession();
+          _logPlay();
+        } else if (audioPlayer.playing) {
           playerState = AudioPlayerState.play;
           _startWrappedSession();
           _logPlay();
-        }
-        if (restorePosition != Duration(seconds: 0) &&
-            restoreDuration != Duration(seconds: 0) &&
-            isPodcast &&
-            tempEpisode == episode) {
-          duration = restoreDuration;
-          tempEpisode = null;
-          seek(restorePosition);
-        } else {
-          restoreDuration = Duration(seconds: 0);
-          restorePosition = Duration(seconds: 0);
         }
         return true;
       } else {
@@ -505,10 +578,11 @@ class CurrentPlayer implements CurrentPlayerContract {
       AudioSource audioSource = AudioSource.uri(Uri.parse(isPodcast
           ? episode?.audio ?? RadioStation.base().streamUrl
           : now?.streamUrl() ?? RadioStation.base().streamUrl));
-      audioPlayer.setAudioSource(audioSource);
+      final resumeAt = isPodcast ? _savedResumePosition() : null;
+      audioPlayer.setAudioSource(audioSource, initialPosition: resumeAt);
       _publishNowPlaying();
       await audioPlayer.play();
-      await audioPlayer.seek(position);
+      if (resumeAt == null) await audioPlayer.seek(position);
       if (audioPlayer.playing) {
         playerState = AudioPlayerState.play;
         _startWrappedSession();
@@ -522,18 +596,22 @@ class CurrentPlayer implements CurrentPlayerContract {
 
   void _scheduleLiveRetry() {
     if (_liveRetryTimer?.isActive ?? false) return;
-    if (_liveRetryCount >= _maxLiveRetries) {
-      _liveRetryCount = 0;
-      playerState = AudioPlayerState.stop;
-      isPodcast = false;
-      if (onUpdate != null) onUpdate!();
-      return;
-    }
+    if (!_userWantsLive || _userPaused) return;
     _liveRetryCount++;
-    _liveRetryTimer = Timer(const Duration(seconds: 2), () async {
-      if (isPodcast || _userPaused || playerState == AudioPlayerState.stop) {
+    final delaySec = (5 * _liveRetryCount).clamp(5, 30);
+    LiveDiag.log('schedule retry #$_liveRetryCount in ${delaySec}s');
+    _liveRetryTimer = Timer(Duration(seconds: delaySec), () async {
+      if (isPodcast || _userPaused || !_userWantsLive) {
+        LiveDiag.log('retry skip (podcast/paused/stopped)');
         return;
       }
+      if (audioPlayer.playing &&
+          audioPlayer.processingState == ProcessingState.ready) {
+        LiveDiag.log('retry skip (self-healed, playing)');
+        _liveRetryCount = 0;
+        return;
+      }
+      LiveDiag.log('retry RESTART #$_liveRetryCount');
       _suppressLiveLog = true;
       await _stop();
       await play();
@@ -543,8 +621,10 @@ class CurrentPlayer implements CurrentPlayerContract {
 
   @override
   void stop() {
+    LiveDiag.log('CurrentPlayer.stop() st=$playerState');
     _pendingLiveRestart = false;
     _userPaused = false;
+    _userWantsLive = false;
     _liveRetryTimer?.cancel();
     _liveRetryCount = 0;
     _stop();
@@ -553,6 +633,7 @@ class CurrentPlayer implements CurrentPlayerContract {
   Future<void> _stop() async {
     if (playerState == AudioPlayerState.play ||
         playerState == AudioPlayerState.pause) {
+      _saveProgress();
       _endWrappedSession();
       playerState = AudioPlayerState.stop;
       if (isPodcast) {
@@ -582,10 +663,12 @@ class CurrentPlayer implements CurrentPlayerContract {
 
   @override
   Future pause() async {
+    LiveDiag.log('CurrentPlayer.pause() st=$playerState');
     if (playerState == AudioPlayerState.play) {
       _userPaused = true;
       await audioPlayer.pause();
       if (!audioPlayer.playing) playerState = AudioPlayerState.pause;
+      _saveProgress();
     }
   }
 

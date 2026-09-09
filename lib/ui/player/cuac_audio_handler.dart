@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:audio_service/audio_service.dart';
+import 'package:cuacfm/data/datasource/episode_progress_local_datasource_contract.dart';
 import 'package:cuacfm/domain/invoker/invoker.dart';
 import 'package:cuacfm/domain/repository/radiocom_repository_contract.dart';
 import 'package:cuacfm/domain/result/result.dart';
@@ -11,9 +12,12 @@ import 'package:cuacfm/models/now.dart';
 import 'package:cuacfm/models/program.dart';
 import 'package:cuacfm/models/time_table.dart';
 import 'package:cuacfm/ui/player/current_player.dart';
+import 'package:cuacfm/utils/live_diag.dart';
+import 'package:hive/hive.dart';
 import 'package:injector/injector.dart';
 import 'package:intl/intl.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:rxdart/rxdart.dart';
 
 class CuacAudioHandler extends BaseAudioHandler {
   static const _seekStep = Duration(seconds: 30);
@@ -21,8 +25,31 @@ class CuacAudioHandler extends BaseAudioHandler {
   static const _tabRecent = 'tab_recent';
   static const _tabFavorites = 'tab_favorites';
   static const _tabPlaylist = 'tab_playlist';
-  static const _fallbackArt =
+
+  // Android Auto content style hints (androidx + legacy keys for compatibility)
+  static const _csBrowsableHint =
+      'androidx.media.utils.extras.CONTENT_STYLE_BROWSABLE_HINT';
+  static const _csPlayableHint =
+      'androidx.media.utils.extras.CONTENT_STYLE_PLAYABLE_HINT';
+  static const _csGroupTitleHint =
+      'androidx.media.utils.extras.CONTENT_STYLE_GROUP_TITLE_HINT';
+  static const _csBrowsableHintLegacy =
+      'android.media.browse.CONTENT_STYLE_BROWSABLE_HINT';
+  static const _csPlayableHintLegacy =
+      'android.media.browse.CONTENT_STYLE_PLAYABLE_HINT';
+  static const _csGroupTitleHintLegacy =
+      'android.media.browse.CONTENT_STYLE_GROUP_TITLE_HINT';
+  static const _csGridItem = 2;
+  static const _csListItem = 1;
+
+  static const _monthsGl = [
+    'xan', 'feb', 'mar', 'abr', 'mai', 'xuñ',
+    'xul', 'ago', 'set', 'out', 'nov', 'dec'
+  ];
+  static const _musicCoverArt =
       'https://cuacfm.org/wp-content/uploads/2026/04/cuac_music_cover.png';
+  static const _defaultProgrammeArt =
+      'https://cuacfm.org/wp-content/uploads/2026/06/default_programme_cover.png';
 
   static const _rewindControl = MediaControl(
     androidIcon: 'drawable/ic_replay_30',
@@ -40,6 +67,10 @@ class CuacAudioHandler extends BaseAudioHandler {
   final Map<String, List<Episode>> _episodesByRss = {};
   final Map<String, TimeTable> _recentByKey = {};
   final Map<String, Program> _favoriteByRss = {};
+  final Map<String, Map<String, dynamic>> _continueByAudio = {};
+  final Map<String, BehaviorSubject<Map<String, dynamic>>> _childrenSubjects =
+      {};
+  bool _wasPlaying = false;
   List<Map<String, dynamic>> _playlistItems = [];
   List<Program> _allProgramsCache = [];
   Now? _liveNow;
@@ -51,7 +82,14 @@ class CuacAudioHandler extends BaseAudioHandler {
 
   CuacAudioHandler(this._player) {
     _player.playbackEventStream.listen((_) => _broadcastState());
-    _player.playingStream.listen((_) => _broadcastState());
+    _player.playingStream.listen((playing) {
+      _broadcastState();
+      // Ao pausar/parar un podcast, refrescar "Seguir escoitando" (posición nova)
+      if (_wasPlaying && !playing && !_isLive) {
+        _notifyInicioChanged();
+      }
+      _wasPlaying = playing;
+    });
     _player.durationStream.listen((duration) {
       final item = mediaItem.valueOrNull;
       if (!_isLive && item != null && duration != null) {
@@ -118,6 +156,7 @@ class CuacAudioHandler extends BaseAudioHandler {
 
   @override
   Future<void> pause() async {
+    LiveDiag.log('handler.pause()');
     try {
       Injector.appInstance.get<CurrentPlayerContract>().pause();
     } catch (_) {}
@@ -126,6 +165,7 @@ class CuacAudioHandler extends BaseAudioHandler {
 
   @override
   Future<void> stop() async {
+    LiveDiag.log('handler.stop()');
     try {
       Injector.appInstance.get<CurrentPlayerContract>().stop();
     } catch (_) {}
@@ -152,18 +192,40 @@ class CuacAudioHandler extends BaseAudioHandler {
   }
 
   @override
+  ValueStream<Map<String, dynamic>> subscribeToChildren(String parentMediaId) {
+    return _childrenSubjects.putIfAbsent(
+        parentMediaId, () => BehaviorSubject.seeded(<String, dynamic>{}));
+  }
+
+  void _notifyInicioChanged() {
+    _childrenSubjects[_tabLive]?.add(<String, dynamic>{});
+  }
+
+  @override
   Future<List<MediaItem>> getChildren(String parentMediaId,
       [Map<String, dynamic>? options]) async {
     switch (parentMediaId) {
       case AudioService.browsableRootId:
-        return const [
-          MediaItem(id: _tabLive, title: 'Directo', playable: false),
-          MediaItem(id: _tabRecent, title: 'Recentes', playable: false),
-          MediaItem(id: _tabFavorites, title: 'Favoritos', playable: false),
+        return [
+          MediaItem(
+              id: _tabLive,
+              title: 'Inicio',
+              playable: false,
+              extras: _homeStyle()),
+          MediaItem(
+              id: _tabRecent,
+              title: 'Recentes',
+              playable: false,
+              extras: _gridStyle()),
+          MediaItem(
+              id: _tabFavorites,
+              title: 'Favoritos',
+              playable: false,
+              extras: _gridStyle()),
           MediaItem(id: _tabPlaylist, title: 'Playlist', playable: false),
         ];
       case _tabLive:
-        return _liveChildren();
+        return _homeChildren();
       case _tabRecent:
         return _recentChildren();
       case _tabFavorites:
@@ -178,21 +240,82 @@ class CuacAudioHandler extends BaseAudioHandler {
     }
   }
 
-  Future<List<MediaItem>> _liveChildren() async {
+  Future<List<MediaItem>> _homeChildren() async {
     Now? now;
     try {
       final result = await _repository.getLiveBroadcast();
       if (result is Success) now = result.data;
     } catch (_) {}
     _liveNow = now ?? Now.mock();
-    return [
+    final items = <MediaItem>[
       MediaItem(
         id: 'live',
         title: _liveNow!.name,
         artist: 'CUAC FM 103.4',
         artUri: _artUri(_liveNow!.logoUrl),
+        extras: _group('Directo'),
       ),
     ];
+    items.addAll(_continueChildren());
+    final discover = await _discoverPrograms();
+    for (final p in discover) {
+      _favoriteByRss[p.rssUrl] = p;
+      items.add(MediaItem(
+        id: 'fav|${p.rssUrl}',
+        title: p.name,
+        playable: false,
+        artUri: _artUri(p.logoUrl),
+        extras: _group('Descubre podcasts'),
+      ));
+    }
+    return items;
+  }
+
+  List<MediaItem> _continueChildren() {
+    EpisodeProgressLocalDataSourceContract? store;
+    try {
+      store =
+          Injector.appInstance.get<EpisodeProgressLocalDataSourceContract>();
+    } catch (_) {}
+    if (store == null) return [];
+    final entries = store.getAll().entries.where((e) {
+      final m = e.value;
+      final pos = (m['position'] as num?)?.toInt() ?? 0;
+      final dur = (m['duration'] as num?)?.toInt() ?? 0;
+      return m['completed'] != true &&
+          (m['title'] as String?)?.isNotEmpty == true &&
+          dur > 0 &&
+          pos > 5 &&
+          pos < dur * 0.9;
+    }).toList()
+      ..sort((a, b) => ((b.value['updatedAt'] as num?)?.toInt() ?? 0)
+          .compareTo((a.value['updatedAt'] as num?)?.toInt() ?? 0));
+    _continueByAudio.clear();
+    return entries.take(2).map((e) {
+      _continueByAudio[e.key] = e.value;
+      final m = e.value;
+      final pos = (m['position'] as num?)?.toInt() ?? 0;
+      final program = m['programName'] as String? ?? 'CUAC FM';
+      return MediaItem(
+        id: 'cont|${e.key}',
+        title: m['title'] as String? ?? '',
+        artist: '$program · ${_formatPos(pos)}',
+        artUri: _artUri(m['logoUrl'] as String? ?? ''),
+        extras: _group('Seguir escoitando'),
+      );
+    }).toList();
+  }
+
+  String _formatPos(int seconds) {
+    final h = seconds ~/ 3600;
+    final m = (seconds % 3600) ~/ 60;
+    final s = seconds % 60;
+    final ss = s.toString().padLeft(2, '0');
+    if (h > 0) {
+      final mm = m.toString().padLeft(2, '0');
+      return '$h:$mm:$ss';
+    }
+    return '$m:$ss';
   }
 
   Future<List<MediaItem>> _recentChildren() async {
@@ -221,7 +344,7 @@ class CuacAudioHandler extends BaseAudioHandler {
       return MediaItem(
         id: key,
         title: e.name,
-        artist: DateFormat('dd/MM').format(e.start),
+        artist: '${e.start.day} ${_monthsGl[e.start.month - 1]}',
         artUri: _artUri(e.logoUrl),
       );
     }).toList();
@@ -238,8 +361,16 @@ class CuacAudioHandler extends BaseAudioHandler {
             .cast<Program>());
       }
     }
+    // Resolver a imaxe en vivo desde o catálogo (por rssUrl): así, se un programa
+    // actualiza a súa portada en Radioco, reflíctese sen ter que re-engadir o favorito.
+    final logos = <String, String>{};
+    for (final p in await _allPrograms()) {
+      if (p.rssUrl.isNotEmpty && p.logoUrl.isNotEmpty) logos[p.rssUrl] = p.logoUrl;
+    }
     _favoriteByRss.clear();
     return favorites.where((p) => p.rssUrl.isNotEmpty).map((p) {
+      final freshLogo = logos[p.rssUrl];
+      if (freshLogo != null && freshLogo.isNotEmpty) p.logoUrl = freshLogo;
       _favoriteByRss[p.rssUrl] = p;
       return MediaItem(
         id: 'fav|${p.rssUrl}',
@@ -266,6 +397,12 @@ class CuacAudioHandler extends BaseAudioHandler {
   Future<List<MediaItem>> _playlistChildren() async {
     await _loadPlaylistItems();
     if (_playlistItems.isEmpty) return [];
+    // Resolver a portada en vivo desde o catálogo (por nome de programa, xa que os
+    // items da playlist non gardan rssUrl) para reflectir cambios de imaxe en Radioco.
+    final logosByName = <String, String>{};
+    for (final p in await _allPrograms()) {
+      if (p.name.isNotEmpty && p.logoUrl.isNotEmpty) logosByName[p.name] = p.logoUrl;
+    }
     return [
       MediaItem(
         id: 'pl_all',
@@ -275,14 +412,24 @@ class CuacAudioHandler extends BaseAudioHandler {
             : '${_playlistItems.length} episodios',
       ),
       ..._playlistItems.map((item) {
+        final fresh = logosByName[item['programName']] ?? (item['logoUrl'] ?? '');
         return MediaItem(
           id: 'pl|${item['audio']}',
           title: item['title'] ?? '',
           artist: item['programName'] ?? 'CUAC FM',
-          artUri: _artUri(item['logoUrl'] ?? ''),
+          artUri: _artUri(fresh),
         );
       }),
     ];
+  }
+
+  Future<String> _freshLogoForProgram(String? programName, String fallback) async {
+    if (programName != null && programName.isNotEmpty) {
+      for (final p in await _allPrograms()) {
+        if (p.name == programName && p.logoUrl.isNotEmpty) return p.logoUrl;
+      }
+    }
+    return fallback;
   }
 
   Future<void> _loadPlaylistItems() async {
@@ -498,6 +645,19 @@ class CuacAudioHandler extends BaseAudioHandler {
       await _playEpisode(player, sorted.first, item.name, item.logoUrl);
       return;
     }
+    if (mediaId.startsWith('cont|')) {
+      final audio = mediaId.substring(5);
+      final m = _continueByAudio[audio];
+      final episode = Episode.fromMap({
+        'title': m?['title'] ?? '',
+        'audio': audio,
+        'link': audio,
+      });
+      await _playEpisode(player, episode,
+          m?['programName'] as String? ?? episode.title,
+          m?['logoUrl'] as String? ?? '');
+      return;
+    }
     if (mediaId.startsWith('ep|')) {
       final rest = mediaId.substring(3);
       final sep = rest.indexOf('|');
@@ -520,8 +680,10 @@ class CuacAudioHandler extends BaseAudioHandler {
       if (_playlistItems.isEmpty) return;
       final item = _playlistItems.first;
       final episode = Episode.fromMap(item);
+      final logo = await _freshLogoForProgram(
+          item['programName'] as String?, item['logoUrl'] ?? '');
       await _playEpisode(
-          player, episode, item['programName'] ?? episode.title, item['logoUrl'] ?? '');
+          player, episode, item['programName'] ?? episode.title, logo);
       return;
     }
     if (mediaId.startsWith('pl|')) {
@@ -532,8 +694,10 @@ class CuacAudioHandler extends BaseAudioHandler {
       }
       if (item == null) return;
       final episode = Episode.fromMap(item);
+      final logo = await _freshLogoForProgram(
+          item['programName'] as String?, item['logoUrl'] ?? '');
       await _playEpisode(
-          player, episode, item['programName'] ?? episode.title, item['logoUrl'] ?? '');
+          player, episode, item['programName'] ?? episode.title, logo);
     }
   }
 
@@ -564,7 +728,7 @@ class CuacAudioHandler extends BaseAudioHandler {
     player.episode = episode;
     player.currentSong = programName;
     player.currentSubtitle = episode.title;
-    player.currentImage = logoUrl.isNotEmpty ? logoUrl : _fallbackArt;
+    player.currentImage = logoUrl.isNotEmpty ? logoUrl : _defaultProgrammeArt;
     if (player.isPlaying() || player.isPaused()) {
       await player.stopAndPlay();
     } else {
@@ -572,11 +736,68 @@ class CuacAudioHandler extends BaseAudioHandler {
     }
   }
 
+  Map<String, dynamic> _gridStyle() => {
+        _csBrowsableHint: _csGridItem,
+        _csPlayableHint: _csGridItem,
+        _csBrowsableHintLegacy: _csGridItem,
+        _csPlayableHintLegacy: _csGridItem,
+      };
+
+  // Inicio: podcasts de Descubre (browsable) en cuadrícula, directo (playable) en lista
+  Map<String, dynamic> _homeStyle() => {
+        _csBrowsableHint: _csGridItem,
+        _csPlayableHint: _csListItem,
+        _csBrowsableHintLegacy: _csGridItem,
+        _csPlayableHintLegacy: _csListItem,
+      };
+
+  Map<String, dynamic> _group(String title) => {
+        _csGroupTitleHint: title,
+        _csGroupTitleHintLegacy: title,
+      };
+
+  Future<List<Program>> _discoverPrograms() async {
+    List<Program> programs = [];
+    try {
+      final result = await _repository.getAllPodcasts();
+      if (result is Success) programs = List<Program>.from(result.data ?? []);
+    } catch (_) {}
+    // Mesma caché que enche a app: só programas con episodios confirmados
+    Box? cache;
+    try {
+      cache = Hive.box('episodes_cache');
+    } catch (_) {}
+    final withEpisodes = programs
+        .where((p) => p.rssUrl.isNotEmpty && cache?.get(p.rssUrl) == true)
+        .toList();
+    // Se a caché aínda non está construída, non mostrar culos de saco
+    final base = withEpisodes.isNotEmpty ? withEpisodes : <Program>[];
+    if (base.isEmpty) return [];
+    base.shuffle(math.Random(DateTime.now().year));
+    final week = _isoWeek();
+    final start = (week * 3) % base.length;
+    final pick = <Program>[];
+    for (int i = 0; i < 3 && i < base.length; i++) {
+      pick.add(base[(start + i) % base.length]);
+    }
+    return pick;
+  }
+
+  int _isoWeek() {
+    final now = DateTime.now();
+    final jan4 = DateTime(now.year, 1, 4);
+    final firstMonday = jan4.subtract(Duration(days: jan4.weekday - 1));
+    return now.difference(firstMonday).inDays ~/ 7;
+  }
+
   Uri _artUri(String url) {
+    if (url.contains('cuac_music_cover')) {
+      return Uri.parse(_musicCoverArt);
+    }
     if (url.isEmpty ||
         url.startsWith('assets/') ||
         url.contains('default-programme-photo')) {
-      return Uri.parse(_fallbackArt);
+      return Uri.parse(_defaultProgrammeArt);
     }
     return Uri.parse(url);
   }
