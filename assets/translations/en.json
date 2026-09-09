@@ -24,6 +24,7 @@
     "news_error" : "There is no news at this moment.",
     "podcast" : "Podcasts",
     "podcast_error" : "There is no podcast at this moment.",
+    "podcast_retry" : "Try again in a little while.",
     "categories" : "Categories",
     "see_all" : "See all"
   },
