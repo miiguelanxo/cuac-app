@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:audio_service/audio_service.dart';
+import 'package:audio_session/audio_session.dart';
 import 'package:cuacfm/data/datasource/episode_progress_local_datasource_contract.dart';
 import 'package:cuacfm/domain/invoker/invoker.dart';
 import 'package:cuacfm/domain/repository/radiocom_repository_contract.dart';
@@ -96,6 +97,26 @@ class CuacAudioHandler extends BaseAudioHandler {
         mediaItem.add(item.copyWith(duration: duration));
       }
     });
+    _initAudioFocusDiag();
+  }
+
+  // Diagnóstico: rexistra os eventos de foco de audio para distinguir as pausas
+  // automáticas do sistema (chamada, outra app, navegación, auriculares) das do usuario.
+  void _initAudioFocusDiag() async {
+    try {
+      final session = await AudioSession.instance;
+      session.interruptionEventStream.listen((e) {
+        LiveDiag.log(
+            'audio interruption begin=${e.begin} type=${e.type} (isLive=$_isLive playing=${_player.playing})');
+      });
+      session.becomingNoisyEventStream.listen((_) {
+        LiveDiag.log('audio becoming noisy (auriculares desconectados)');
+      });
+      session.devicesChangedEventStream.listen((e) {
+        LiveDiag.log(
+            'audio devices changed added=${e.devicesAdded.length} removed=${e.devicesRemoved.length}');
+      });
+    } catch (_) {}
   }
 
   void setNowPlaying(MediaItem item, {required bool isLive}) {
