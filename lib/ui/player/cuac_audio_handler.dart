@@ -508,7 +508,8 @@ class CuacAudioHandler extends BaseAudioHandler {
 
   Future<void> _handleSearch(String query, CurrentPlayerContract player) async {
     final normQuery = _normalize(query);
-    if (_cleanQuery(normQuery).isEmpty) {
+    if (_cleanQuery(normQuery).isEmpty ||
+        _liveAliases.any((a) => normQuery.contains(a))) {
       await _playLive(player);
       return;
     }
@@ -533,6 +534,12 @@ class CuacAudioHandler extends BaseAudioHandler {
     'en', 'el', 'la', 'los', 'las', 'e', 'y',
     'ultimo', 'ultima', 'novo', 'nova', 'episodio', 'programa', 'capitulo',
     'cuac', 'fm', 'radio',
+  };
+
+  static const _liveAliases = {
+    'radio comunitaria', 'comunitaria', 'continuidade',
+    'en directo', 'directo', 'a emisora', 'emisora',
+    '103.4', '103 4', '1034',
   };
 
   Program? _matchProgram(String normQuery, List<Program> programs) {
