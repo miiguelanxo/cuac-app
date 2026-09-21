@@ -27,7 +27,6 @@ class CuacAudioHandler extends BaseAudioHandler {
   static const _tabFavorites = 'tab_favorites';
   static const _tabPlaylist = 'tab_playlist';
 
-  // Android Auto content style hints (androidx + legacy keys for compatibility)
   static const _csBrowsableHint =
       'androidx.media.utils.extras.CONTENT_STYLE_BROWSABLE_HINT';
   static const _csPlayableHint =
@@ -85,7 +84,6 @@ class CuacAudioHandler extends BaseAudioHandler {
     _player.playbackEventStream.listen((_) => _broadcastState());
     _player.playingStream.listen((playing) {
       _broadcastState();
-      // Ao pausar/parar un podcast, refrescar "Seguir escoitando" (posición nova)
       if (_wasPlaying && !playing && !_isLive) {
         _notifyInicioChanged();
       }
@@ -100,8 +98,6 @@ class CuacAudioHandler extends BaseAudioHandler {
     _initAudioFocusDiag();
   }
 
-  // Diagnóstico: rexistra os eventos de foco de audio para distinguir as pausas
-  // automáticas do sistema (chamada, outra app, navegación, auriculares) das do usuario.
   void _initAudioFocusDiag() async {
     try {
       final session = await AudioSession.instance;
@@ -382,8 +378,6 @@ class CuacAudioHandler extends BaseAudioHandler {
             .cast<Program>());
       }
     }
-    // Resolver a imaxe en vivo desde o catálogo (por rssUrl): así, se un programa
-    // actualiza a súa portada en Radioco, reflíctese sen ter que re-engadir o favorito.
     final logos = <String, String>{};
     for (final p in await _allPrograms()) {
       if (p.rssUrl.isNotEmpty && p.logoUrl.isNotEmpty) logos[p.rssUrl] = p.logoUrl;
@@ -418,8 +412,6 @@ class CuacAudioHandler extends BaseAudioHandler {
   Future<List<MediaItem>> _playlistChildren() async {
     await _loadPlaylistItems();
     if (_playlistItems.isEmpty) return [];
-    // Resolver a portada en vivo desde o catálogo (por nome de programa, xa que os
-    // items da playlist non gardan rssUrl) para reflectir cambios de imaxe en Radioco.
     final logosByName = <String, String>{};
     for (final p in await _allPrograms()) {
       if (p.name.isNotEmpty && p.logoUrl.isNotEmpty) logosByName[p.name] = p.logoUrl;
@@ -764,7 +756,6 @@ class CuacAudioHandler extends BaseAudioHandler {
         _csPlayableHintLegacy: _csGridItem,
       };
 
-  // Inicio: podcasts de Descubre (browsable) en cuadrícula, directo (playable) en lista
   Map<String, dynamic> _homeStyle() => {
         _csBrowsableHint: _csGridItem,
         _csPlayableHint: _csListItem,
@@ -783,7 +774,6 @@ class CuacAudioHandler extends BaseAudioHandler {
       final result = await _repository.getAllPodcasts();
       if (result is Success) programs = List<Program>.from(result.data ?? []);
     } catch (_) {}
-    // Mesma caché que enche a app: só programas con episodios confirmados
     Box? cache;
     try {
       cache = Hive.box('episodes_cache');
@@ -791,7 +781,6 @@ class CuacAudioHandler extends BaseAudioHandler {
     final withEpisodes = programs
         .where((p) => p.rssUrl.isNotEmpty && cache?.get(p.rssUrl) == true)
         .toList();
-    // Se a caché aínda non está construída, non mostrar culos de saco
     final base = withEpisodes.isNotEmpty ? withEpisodes : <Program>[];
     if (base.isEmpty) return [];
     base.shuffle(math.Random(DateTime.now().year));

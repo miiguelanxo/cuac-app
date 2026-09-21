@@ -580,8 +580,6 @@ class MyHomePageState extends State<MyHomePage>
     setState(() => _favorites = favorites);
   }
 
-  // Resolve a portada dun favorito desde o catálogo fresco (por rssUrl), así unha
-  // actualización de imaxe en Radioco reflíctese sen ter que re-engadir o favorito.
   String _freshLogo(Program program) {
     try {
       final match = _podcast.firstWhere((p) => p.rssUrl == program.rssUrl);
