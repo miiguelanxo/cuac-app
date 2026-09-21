@@ -516,7 +516,7 @@ class CuacAudioHandler extends BaseAudioHandler {
 
   Future<void> _handleSearch(String query, CurrentPlayerContract player) async {
     final normQuery = _normalize(query);
-    if (normQuery.isEmpty) {
+    if (_cleanQuery(normQuery).isEmpty) {
       await _playLive(player);
       return;
     }
